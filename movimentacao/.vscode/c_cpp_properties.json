@@ -1,0 +1,18 @@
+{
+  "configurations": [
+    {
+      "name": "Win32",
+      "includePath": [
+        "${workspaceFolder}/**",
+        "C:/Users/Olimpiada/includes",
+        "C:/Users/Olimpiada/includes/pigpio"
+      ],
+      "defines": [],
+      "intelliSenseMode": "windows-gcc-x64",
+      "compilerPath": "C:/MinGW/bin/gcc.exe",
+      "cStandard": "c11",
+      "cppStandard": "c++17"
+    }
+  ],
+  "version": 4
+}
