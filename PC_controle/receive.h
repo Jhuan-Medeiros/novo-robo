@@ -6,6 +6,11 @@ struct controleState
     float ly;
     float rx;
     float ry;
+
+    int dUp;
+    int dDown;
+    int dLeft;
+    int dRight;
 };
 
 void iniciarRecepcaoControle();
