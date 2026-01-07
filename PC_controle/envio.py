@@ -2,7 +2,7 @@ import pygame
 import socket
 import time
 
-IP_RASP = "10.91.248.7"
+IP_RASP = "10.91.238.188"
 PORTA = 5005
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
