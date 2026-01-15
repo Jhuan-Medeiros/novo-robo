@@ -11,6 +11,10 @@ struct controleState
     int dDown;
     int dLeft;
     int dRight;
+
+    int triangle;
+    int l1;
+    int l2;
 };
 
 void iniciarRecepcaoControle();

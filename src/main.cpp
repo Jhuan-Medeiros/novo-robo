@@ -2,41 +2,56 @@
 #include <pigpio.h>
 #include <stdlib.h>
 #include "../PC_controle/receive.h"
+
 #define _USE_MATH_DEFINES
 #include <cmath>
 #include <algorithm>
 
+// ===== BIBLIOTECAS =====
+#include "../modules/encoder/Encoder.h"
+#include "../libs/PID/PID_v1.h"
+
 // ================= PINOS =================
 
+// Motores 1, 2, 3 (omnidirecional com PID)
 #define M1_IN1 27
-#define M1_IN2 22
-#define M1_PWM 17
+#define M1_IN2 17
+#define M1_PWM 22
 #define M1_C1 23
 #define M1_C2 24
 
 #define M2_IN1 11
 #define M2_IN2 9
 #define M2_PWM 10
-#define M2_C1 25
-#define M2_C2 8
+#define M2_C1 8
+#define M2_C2 25
 
-#define M3_IN1 13
+#define M3_IN1 5
 #define M3_IN2 6
-#define M3_PWM 5
-#define M3_C1 7
-#define M3_C2 1
+#define M3_PWM 13
+#define M3_C1 12
+#define M3_C2 7
+
+// Motor 4 (subida - sem PID)
+#define M4_IN1 21
+#define M4_IN2 20
+#define M4_PWM 16
+#define M4_C1 19
+#define M4_C2 26
 
 // ================= PARAMETROS =================
 
 const float center = 0.103f;
 const float radius = 0.033f;
 
-const float sMax = 0.30f;
-const float rMax = 1.0f;
+const float sMax = 0.06f; // Velocidade bem reduzida
+const float rMax = 0.10f; // Rotação bem lenta
 
-const float CPR = 472.0f;
+// Encoder AB (x4)
+const float CPR_PHYSICAL = 472.0f;
+const float CPR_EFFECTIVE = CPR_PHYSICAL * 4.0f;
 
-// ================= STRUCTS =================
+// ================= ESTRUTURAS =================
 
 struct spdWheels
 {
@@ -45,192 +60,135 @@ struct spdWheels
     float w3;
 };
 
-struct motor
+// ================= ENCODERS =================
+
+Encoder enc1(M1_C1, M1_C2, CPR_EFFECTIVE);
+Encoder enc2(M2_C1, M2_C2, CPR_EFFECTIVE);
+Encoder enc3(M3_C1, M3_C2, CPR_EFFECTIVE);
+Encoder enc4(M4_C1, M4_C2, CPR_EFFECTIVE); // Encoder do motor de subida
+
+// ================= PID VARS =================
+
+double in1 = 0, out1 = 0, sp1 = 0;
+double in2 = 0, out2 = 0, sp2 = 0;
+double in3 = 0, out3 = 0, sp3 = 0;
+
+// ================= PID CONTROLLERS =================
+// Ganhos reduzidos para evitar oscilação
+
+// Motor 1 - suavizado
+PID pid1(&in1, &out1, &sp1, 0.5, 0.01, 0.0, DIRECT);
+
+// Motor 2 - suavizado mas um pouco mais forte
+PID pid2(&in2, &out2, &sp2, 0.5, 0.01, 0.0, DIRECT);
+
+// Motor 3 - bem suavizado (era o mais forte)
+PID pid3(&in3, &out3, &sp3, 0.5, 0.01, 0.0, DIRECT);
+
+// ================= FUNÇÕES AUX =================
+
+float deadzone(float value, float zone = 0.10f)
 {
-    int in1;
-    int in2;
-    int pwmPin;
-    int c1;
-    int c2;
-
-    volatile int32_t pos = 0;
-    volatile uint8_t lastAB = 0;
-
-    int32_t prevPos = 0;
-    uint32_t prevTime = 0;
-
-    float prevError = 0;
-    float integralError = 0;
-
-    float kp = 0.6f;
-    float ki = 0.5f;
-    float kd = 0.05f;
-};
-
-// ================= QUADRATURA =================
-
-const int8_t quadTable[16] = {
-    0, -1, +1, 0,
-    +1, 0, 0, -1,
-    -1, 0, 0, +1,
-    0, +1, -1, 0};
-
-// ================= MOTORES =================
-
-motor motors[3] = {
-    {M1_IN1, M1_IN2, M1_PWM, M1_C1, M1_C2},
-    {M2_IN1, M2_IN2, M2_PWM, M2_C1, M2_C2},
-    {M3_IN1, M3_IN2, M3_PWM, M3_C1, M3_C2}};
-
-// ================= SETUP MOTOR =================
-
-void setupMotors(const motor &m)
-{
-    gpioSetMode(m.in1, PI_OUTPUT);
-    gpioSetMode(m.in2, PI_OUTPUT);
-    gpioSetMode(m.pwmPin, PI_OUTPUT);
-
-    gpioSetMode(m.c1, PI_INPUT);
-    gpioSetMode(m.c2, PI_INPUT);
-
-    gpioSetPullUpDown(m.c1, PI_PUD_UP);
-    gpioSetPullUpDown(m.c2, PI_PUD_UP);
-
-    gpioSetPWMfrequency(m.pwmPin, 5000);
-    gpioSetPWMrange(m.pwmPin, 255);
-}
-
-// ================= ENCODER ISR =================
-
-void encoderISR(int gpio, int level, uint32_t tick, void *user)
-{
-    if (level != 0 && level != 1)
-        return;
-
-    motor *m = (motor *)user;
-
-    uint32_t levels = gpioRead_Bits_0_31();
-    uint8_t A = (levels >> m->c1) & 1;
-    uint8_t B = (levels >> m->c2) & 1;
-
-    uint8_t currentAB = (A << 1) | B;
-    uint8_t index = (m->lastAB << 2) | currentAB;
-
-    m->pos += quadTable[index];
-    m->lastAB = currentAB;
-}
-
-// ================= PID =================
-
-float computePID(motor *m, float targetSpeed)
-{
-    uint32_t now = gpioTick();
-    float dt = (now - m->prevTime) * 1e-6f;
-
-    if (dt < 0.001f)
-        return 0;
-
-    int32_t delta = m->pos - m->prevPos;
-    float currentSpeed = delta / dt;
-
-    float error = targetSpeed - currentSpeed;
-
-    m->integralError += error * dt;
-    m->integralError = std::clamp(m->integralError, -200.0f, 200.0f);
-
-    float derivative = (error - m->prevError) / dt;
-
-    float output =
-        m->kp * error +
-        m->ki * m->integralError +
-        m->kd * derivative;
-
-    output = std::clamp(output, -255.0f, 255.0f);
-
-    m->prevPos = m->pos;
-    m->prevError = error;
-    m->prevTime = now;
-
-    if (fabs(targetSpeed) < 5.0f)
-    {
-        m->integralError = 0;
-        return 0;
-    }
-
-    return output;
-}
-
-// ================= AUX =================
-
-float deadzone(float value, float zone = 0.20f)
-{
-    if (fabs(value) < zone)
-        return 0;
+    if (std::abs(value) < zone)
+        return 0.0f;
     return value;
 }
 
-// ================= CINEMATICA =================
-
 spdWheels conversion(float lx, float ly, float rx)
 {
-    // 1. Inversão de Eixo (Muitos controles o Y é invertido: para cima é negativo)
-    // Se o seu controle já estiver "certo", remova o sinal de menos.
-    float vx_raw = lx * sMax;
-    float vy_raw = -ly * sMax; // Tente com '-' se o 'pra cima' estiver indo para trás
-    float w = rx * rMax;
+    // --- PADRONIZAÇÃO DE EIXOS ---
+    // lx (horizontal) -> v_lateral (Eixo X)
+    // ly (vertical)   -> v_frontal (Eixo Y)
+    float vx = lx * sMax; 
+    float vy = ly * sMax; 
+    float w  = rx * rMax; 
 
-    // 2. COMPENSAÇÃO DE ROTAÇÃO (O segredo está aqui)
-    // Ajuste este valor (em radianos) até que 'pra cima' no stick seja 'frente' no robô.
-    // Como a diagonal (45°) está sendo a frente, tente -45° ou +45° (M_PI / 4.0f)
-    float headingOffset = -M_PI / 4.0f;
-
-    float vx = vx_raw * cos(headingOffset) - vy_raw * sin(headingOffset);
-    float vy = vx_raw * sin(headingOffset) + vy_raw * cos(headingOffset);
-
-    // 3. Deadzone
-    vx = deadzone(vx, 0.10f);
-    vy = deadzone(vy, 0.10f);
-    w = deadzone(w, 0.10f);
+    vx = deadzone(vx, 0.03f);
+    vy = deadzone(vy, 0.03f);
+    w  = deadzone(w, 0.03f);
 
     const float r = radius;
     const float L = center;
 
-    // 4. Ângulos das rodas (Mantendo o padrão 30°, 150°, 270°)
-    const float th1 = M_PI / 6.0f;
-    const float th2 = 5.0f * M_PI / 6.0f;
-    const float th3 = 3.0f * M_PI / 2.0f;
+    // --- GEOMETRIA ---
+    // Coloca a Roda 1 exatamente atrás (270 graus ou 3*PI/2)
+    float offset = (3.0f * M_PI) / 2.0f; 
 
-    return {
-        (-sin(th1) * vx + cos(th1) * vy + L * w) / r,
-        (-sin(th2) * vx + cos(th2) * vy + L * w) / r,
-        (-sin(th3) * vx + cos(th3) * vy + L * w) / r};
+    spdWheels spd;
+
+    // Ângulos das rodas (0, 120 e 240 graus + o deslocamento)
+    float a1 = 0.0f + offset;                   // 270° (Atrás)
+    float a2 = (2.0f * M_PI / 3.0f) + offset;   // 30°  (Frente-Esquerda)
+    float a3 = (4.0f * M_PI / 3.0f) + offset;   // 150° (Frente-Direita)
+
+    // --- CINEMÁTICA INVERSA ---
+    // A fórmula correta para robôs omni de 3 rodas:
+    // Wi = (-sin(alpha) * Vx + cos(alpha) * Vy + L * w) / r
+    
+    spd.w1 = (-sin(a1) * vx + cos(a1) * vy + L * w) / r;
+    spd.w2 = (-sin(a2) * vx + cos(a2) * vy + L * w) / r;
+    spd.w3 = (-sin(a3) * vx + cos(a3) * vy + L * w) / r;
+
+    return spd;
 }
 
-// ================= MOTOR =================
-
-void setMotor(int IN1, int IN2, int pwmPin, float val)
+void setMotor(int IN1, int IN2, int pwmPin, float controlValue)
 {
-    val = std::clamp(val, -255.0f, 255.0f);
-    int pwm = abs((int)val);
+    const int PWM_MIN = 30; // PWM mínimo aumentado
 
-    if (val > 0.1f)
+    if (controlValue > 255)
+        controlValue = 255;
+    if (controlValue < -255)
+        controlValue = -255;
+
+    int pwm = abs((int)controlValue);
+
+    // Se PWM muito baixo, zerar completamente para evitar tremor
+    if (pwm > 0 && pwm < PWM_MIN)
     {
-        gpioWrite(IN1, 1);
-        gpioWrite(IN2, 0);
+        pwm = 0; // Mudado: ao invés de forçar PWM_MIN, zera
     }
-    else if (val < -0.1f)
+
+    if (controlValue > 1.0f)
     {
-        gpioWrite(IN1, 0);
-        gpioWrite(IN2, 1);
+        gpioWrite(IN1, PI_HIGH);
+        gpioWrite(IN2, PI_LOW);
+    }
+    else if (controlValue < -1.0f)
+    {
+        gpioWrite(IN1, PI_LOW);
+        gpioWrite(IN2, PI_HIGH);
     }
     else
     {
-        gpioWrite(IN1, 0);
-        gpioWrite(IN2, 0);
+        gpioWrite(IN1, PI_LOW);
+        gpioWrite(IN2, PI_LOW);
         pwm = 0;
     }
 
     gpioPWM(pwmPin, pwm);
+}
+
+void setMotorSimple(int IN1, int IN2, int pwmPin, int pwmValue, bool forward)
+{
+    if (forward)
+    {
+        gpioWrite(IN1, PI_LOW);
+        gpioWrite(IN2, PI_HIGH);
+    }
+    else
+    {
+        gpioWrite(IN1, PI_HIGH);
+        gpioWrite(IN2, PI_LOW);
+    }
+    gpioPWM(pwmPin, pwmValue);
+}
+
+void stopMotorSimple(int IN1, int IN2, int pwmPin)
+{
+    gpioWrite(IN1, PI_HIGH);
+    gpioWrite(IN2, PI_LOW);
+    gpioPWM(pwmPin, 0);
 }
 
 // ================= MAIN =================
@@ -240,38 +198,184 @@ int main()
     if (gpioInitialise() < 0)
         return 1;
 
-    for (int i = 0; i < 3; i++)
-    {
-        setupMotors(motors[i]);
+    // Motores 1, 2, 3
+    gpioSetMode(M1_IN1, PI_OUTPUT);
+    gpioSetMode(M1_IN2, PI_OUTPUT);
+    gpioSetMode(M1_PWM, PI_OUTPUT);
 
-        uint8_t A = gpioRead(motors[i].c1);
-        uint8_t B = gpioRead(motors[i].c2);
-        motors[i].lastAB = (A << 1) | B;
+    gpioSetMode(M2_IN1, PI_OUTPUT);
+    gpioSetMode(M2_IN2, PI_OUTPUT);
+    gpioSetMode(M2_PWM, PI_OUTPUT);
 
-        gpioSetAlertFuncEx(motors[i].c1, encoderISR, &motors[i]);
-        gpioSetAlertFuncEx(motors[i].c2, encoderISR, &motors[i]);
-    }
+    gpioSetMode(M3_IN1, PI_OUTPUT);
+    gpioSetMode(M3_IN2, PI_OUTPUT);
+    gpioSetMode(M3_PWM, PI_OUTPUT);
+
+    // Motor 4 (subida)
+    gpioSetMode(M4_IN1, PI_OUTPUT);
+    gpioSetMode(M4_IN2, PI_OUTPUT);
+    gpioSetMode(M4_PWM, PI_OUTPUT);
+
+    gpioSetPWMfrequency(M1_PWM, 1000);
+    gpioSetPWMfrequency(M2_PWM, 1000);
+    gpioSetPWMfrequency(M3_PWM, 1000);
+    gpioSetPWMfrequency(M4_PWM, 1000);
+
+    gpioSetPWMrange(M1_PWM, 255);
+    gpioSetPWMrange(M2_PWM, 255);
+    gpioSetPWMrange(M3_PWM, 255);
+    gpioSetPWMrange(M4_PWM, 255);
+
+    // Encoders
+    enc1.begin();
+    enc2.begin();
+    enc3.begin();
+    enc4.begin();
+
+    gpioDelay(100000); // 100ms para estabilizar
+
+    // PID
+    pid1.SetOutputLimits(-255, 255);
+    pid2.SetOutputLimits(-255, 255);
+    pid3.SetOutputLimits(-255, 255);
+
+    pid1.SetSampleTime(20);
+    pid2.SetSampleTime(20);
+    pid3.SetSampleTime(20);
+
+    pid1.SetMode(AUTOMATIC);
+    pid2.SetMode(AUTOMATIC);
+    pid3.SetMode(AUTOMATIC);
 
     iniciarRecepcaoControle();
 
-    const float RAD_TO_PULSE = CPR / (2.0f * M_PI);
+    const float RAD_TO_PULSE = CPR_EFFECTIVE / (2.0f * M_PI);
+
+    std::cout << "Sistema iniciado!" << std::endl;
+    std::cout << "RAD_TO_PULSE: " << RAD_TO_PULSE << std::endl;
+
+    int loopCount = 0;
 
     while (true)
     {
         controleState c = lerControle();
 
-        spdWheels s = conversion(c.lx, c.ly, c.rx);
+        float lx = c.lx;
+        float ly = c.ly;
+        float rx = c.rx;
 
-        setMotor(M1_IN1, M1_IN2, M1_PWM,
-                 computePID(&motors[0], s.w1 * RAD_TO_PULSE));
+        // D-pad tem prioridade (apenas para movimento omni)
+        if (c.dUp)
+        {
+            ly = 1;
+            lx = 0;
+            rx = 0;
+        }
+        if (c.dDown)
+        {
+            ly = -1;
+            lx = 0;
+            rx = 0;
+        }
+        if (c.dLeft)
+        {
+            lx = -1;
+            ly = 0;
+            rx = 0;
+        }
+        if (c.dRight)
+        {
+            lx = 1;
+            ly = 0;
+            rx = 0;
+        }
 
-        setMotor(M2_IN1, M2_IN2, M2_PWM,
-                 computePID(&motors[1], s.w2 * RAD_TO_PULSE));
+        // ===== CONTROLE DO MOTOR 4 (SUBIDA) =====
+        if (c.l1)
+        {
+            // L1 pressionado - subir
+            setMotorSimple(M4_IN1, M4_IN2, M4_PWM, 255, true);
+        }
+        else if (c.l2)
+        {
+            // L2 pressionado - descer
+            setMotorSimple(M4_IN1, M4_IN2, M4_PWM, 255, false);
+        }
+        else
+        {
+            // Nenhum botão - parar motor 4
+            stopMotorSimple(M4_IN1, M4_IN2, M4_PWM);
+        }
 
-        setMotor(M3_IN1, M3_IN2, M3_PWM,
-                 computePID(&motors[2], s.w3 * RAD_TO_PULSE));
+        // ===== CONTROLE DOS MOTORES 1, 2, 3 (COM PID) =====
+        spdWheels s = conversion(lx, ly, rx);
 
-        gpioDelay(20000);
+        // Setpoints em pulsos/segundo
+        sp1 = s.w1 * RAD_TO_PULSE;
+        sp2 = s.w2 * RAD_TO_PULSE;
+        sp3 = s.w3 * RAD_TO_PULSE;
+
+        // Leitura dos encoders
+        in1 = enc1.getSpeed();
+        in2 = enc2.getSpeed();
+        in3 = enc3.getSpeed();
+
+        // Se setpoint muito pequeno, zerar tudo e resetar PID
+        if (std::abs(sp1) < 10.0f)
+        { // Threshold aumentado
+            out1 = 0;
+            setMotor(M1_IN1, M1_IN2, M1_PWM, 0);
+            pid1.SetMode(MANUAL);
+            pid1.SetMode(AUTOMATIC); // Reset
+        }
+        else
+        {
+            pid1.Compute();
+            setMotor(M1_IN1, M1_IN2, M1_PWM, out1);
+        }
+
+        if (std::abs(sp2) < 10.0f)
+        { // Threshold aumentado
+            out2 = 0;
+            setMotor(M2_IN1, M2_IN2, M2_PWM, 0);
+            pid2.SetMode(MANUAL);
+            pid2.SetMode(AUTOMATIC);
+        }
+        else
+        {
+            pid2.Compute();
+            setMotor(M2_IN1, M2_IN2, M2_PWM, out2);
+        }
+
+        if (std::abs(sp3) < 10.0f)
+        { // Threshold aumentado
+            out3 = 0;
+            setMotor(M3_IN1, M3_IN2, M3_PWM, 0);
+            pid3.SetMode(MANUAL);
+            pid3.SetMode(AUTOMATIC);
+        }
+        else
+        {
+            pid3.Compute();
+            setMotor(M3_IN1, M3_IN2, M3_PWM, out3);
+        }
+
+        // Debug a cada 50 loops (~1 segundo)
+        if (loopCount++ % 50 == 0)
+        {
+            std::cout << "M1: sp=" << (int)sp1 << " in=" << (int)in1 << " out=" << (int)out1
+                      << " pos=" << enc1.getPosition() << std::endl;
+            std::cout << "M2: sp=" << (int)sp2 << " in=" << (int)in2 << " out=" << (int)out2
+                      << " pos=" << enc2.getPosition() << std::endl;
+            std::cout << "M3: sp=" << (int)sp3 << " in=" << (int)in3 << " out=" << (int)out3
+                      << " pos=" << enc3.getPosition() << std::endl;
+            std::cout << "M4: speed=" << (int)enc4.getSpeed() 
+                      << " pos=" << enc4.getPosition() 
+                      << " (L1=" << c.l1 << " L2=" << c.l2 << ")" << std::endl;
+            std::cout << "---" << std::endl;
+        }
+
+        gpioDelay(20000); // 20 ms
     }
 
     gpioTerminate();
