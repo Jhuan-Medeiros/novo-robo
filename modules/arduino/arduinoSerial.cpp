@@ -3,25 +3,144 @@
 #include <unistd.h>
 #include <iostream>
 #include <string>
+#include <cstring>
+#include <thread>
+#include <atomic>
+#include <mutex>
+#include <algorithm>
+
+// Estrutura para armazenar os dados dos sensores
+struct DadosSensores {
+    float ultraEsq = 0.0f;
+    float ultraDir = 0.0f;
+    int laserFrente = 0;
+    int laserTras = 0;
+    int estadoLinha = 0;
+    bool valido = false;
+};
+
+// Variáveis globais thread-safe
+static std::atomic<bool> threadAtiva{false};
+static std::mutex dadosMutex;
+static DadosSensores dadosAtuais;
+static int serialFd = -1;
+
+// Thread de leitura contínua
+static void threadLeituraSerial() {
+    std::string buffer;
+    char temp[256];
+    
+    while (threadAtiva) {
+        int n = read(serialFd, temp, sizeof(temp) - 1);
+        
+        if (n > 0) {
+            temp[n] = '\0';
+            buffer += std::string(temp);
+            
+            // Processa todas as linhas completas
+            size_t pos;
+            while ((pos = buffer.find('\n')) != std::string::npos) {
+                std::string linha = buffer.substr(0, pos);
+                buffer.erase(0, pos + 1);
+                
+                // Remove \r e espaços
+                linha.erase(std::remove_if(linha.begin(), linha.end(), 
+                    [](char c) { return c == '\r' || c == ' ' || c == '\t'; }), linha.end());
+                
+                // Parse da linha: distEsq,distDir,laserF,laserT,linha
+                float ue, ud;
+                int lf, lt, el;
+                
+                if (sscanf(linha.c_str(), "%f,%f,%d,%d,%d", &ue, &ud, &lf, &lt, &el) == 5) {
+                    // Atualiza dados de forma thread-safe
+                    std::lock_guard<std::mutex> lock(dadosMutex);
+                    dadosAtuais.ultraEsq = ue;
+                    dadosAtuais.ultraDir = ud;
+                    dadosAtuais.laserFrente = lf;
+                    dadosAtuais.laserTras = lt;
+                    dadosAtuais.estadoLinha = el;
+                    dadosAtuais.valido = true;
+                }
+            }
+            
+            // Limita buffer
+            if (buffer.length() > 512) {
+                buffer.clear();
+            }
+        }
+        
+        // Delay mínimo para não sobrecarregar CPU
+        usleep(1000); // 1ms
+    }
+}
 
 int configurarSerial(const char* porta) {
-    int fd = open(porta, O_RDWR | O_NOCTTY | O_NDELAY);
-    if (fd == -1) return -1;
+    serialFd = open(porta, O_RDWR | O_NOCTTY);
+    if (serialFd == -1) return -1;
 
     struct termios options;
-    tcgetattr(fd, &options);
+    tcgetattr(serialFd, &options);
+    
     cfsetispeed(&options, B115200);
     cfsetospeed(&options, B115200);
+    
     options.c_cflag |= (CLOCAL | CREAD);
     options.c_cflag &= ~PARENB;
     options.c_cflag &= ~CSTOPB;
     options.c_cflag &= ~CSIZE;
     options.c_cflag |= CS8;
-    tcsetattr(fd, TCSANOW, &options);
-    return fd;
+    
+    options.c_lflag &= ~(ICANON | ECHO | ECHOE | ISIG);
+    options.c_iflag &= ~(IXON | IXOFF | IXANY | ICRNL);
+    options.c_oflag &= ~OPOST;
+    
+    // Timeout mínimo
+    options.c_cc[VMIN] = 0;
+    options.c_cc[VTIME] = 1;
+    
+    tcsetattr(serialFd, TCSANOW, &options);
+    
+    // Aguarda reset do Arduino
+    std::cout << "Aguardando Arduino resetar..." << std::endl;
+    usleep(2500000);
+    tcflush(serialFd, TCIOFLUSH);
+    
+    // Inicia thread de leitura
+    threadAtiva = true;
+    std::thread(threadLeituraSerial).detach();
+    
+    std::cout << "Arduino pronto! Thread de leitura iniciada." << std::endl;
+    
+    return serialFd;
 }
 
 void enviarServos(int fd, int pinca, int angulo) {
-    std::string comando = std::to_string(pinca) + "," + std::to_string(angulo) + "\n";
+    std::string comando = "P" + std::to_string(pinca) + "A" + std::to_string(angulo) + "\n";
     write(fd, comando.c_str(), comando.length());
+    // Removido tcdrain() para evitar delay
+}
+
+// Função de leitura instantânea (SEM DELAY)
+std::string lerSensores(int fd) {
+    std::lock_guard<std::mutex> lock(dadosMutex);
+    
+    if (!dadosAtuais.valido) {
+        return "Aguardando dados...";
+    }
+    
+    char buffer[128];
+    snprintf(buffer, sizeof(buffer), "%.1f,%.1f,%d,%d,%d",
+             dadosAtuais.ultraEsq,
+             dadosAtuais.ultraDir,
+             dadosAtuais.laserFrente,
+             dadosAtuais.laserTras,
+             dadosAtuais.estadoLinha);
+    
+    return std::string(buffer);
+}
+
+// Nova função para acesso direto aos dados (ZERO DELAY)
+DadosSensores obterDadosSensores() {
+    std::lock_guard<std::mutex> lock(dadosMutex);
+    return dadosAtuais;
 }

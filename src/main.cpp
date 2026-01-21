@@ -10,46 +10,47 @@
 // ===== BIBLIOTECAS =====
 #include "../modules/encoder/Encoder.h"
 #include "../libs/PID/PID_v1.h"
+#include "../modules/arduino/arduinoSerial.h"
 
 // ================= PINOS =================
 
-// Motores 1, 2, 3 (omnidirecional com PID)
-#define M1_IN1 27
-#define M1_IN2 17
+#define M1_IN1 17
+#define M1_IN2 27
 #define M1_PWM 22
-#define M1_C1 23
-#define M1_C2 24
 
 #define M2_IN1 11
 #define M2_IN2 9
 #define M2_PWM 10
-#define M2_C1 8
-#define M2_C2 25
 
 #define M3_IN1 5
 #define M3_IN2 6
 #define M3_PWM 13
-#define M3_C1 12
-#define M3_C2 7
 
-// Motor 4 (subida - sem PID)
+// Motor 4
 #define M4_IN1 21
 #define M4_IN2 20
 #define M4_PWM 16
-#define M4_C1 19
-#define M4_C2 26
+
+#define limite 4
 
 // ================= PARAMETROS =================
 
 const float center = 0.103f;
 const float radius = 0.033f;
 
-const float sMax = 0.06f; // Velocidade bem reduzida
-const float rMax = 0.10f; // Rotação bem lenta
+// Velocidades MUITO reduzidas para testes
+const float sMax = 0.03f; // Velocidade bem reduzida
+const float rMax = 0.05f; // Rotação bem lenta
 
-// Encoder AB (x4)
 const float CPR_PHYSICAL = 472.0f;
 const float CPR_EFFECTIVE = CPR_PHYSICAL * 4.0f;
+
+// Servos
+const int SERVO_1_MIN = 3;
+const int SERVO_1_MAX = 55;
+const int SERVO_2_MIN = 0;
+const int SERVO_2_MAX = 60;
+const int SERVO_STEP = 10;
 
 // ================= ESTRUTURAS =================
 
@@ -61,11 +62,12 @@ struct spdWheels
 };
 
 // ================= ENCODERS =================
+// Agora usam índices 0-3 em vez de pinos GPIO
 
-Encoder enc1(M1_C1, M1_C2, CPR_EFFECTIVE);
-Encoder enc2(M2_C1, M2_C2, CPR_EFFECTIVE);
-Encoder enc3(M3_C1, M3_C2, CPR_EFFECTIVE);
-Encoder enc4(M4_C1, M4_C2, CPR_EFFECTIVE); // Encoder do motor de subida
+Encoder enc1(0);  // Motor 1 = Encoder index 0
+Encoder enc2(1);  // Motor 2 = Encoder index 1
+Encoder enc3(2);  // Motor 3 = Encoder index 2
+Encoder enc4(3);  // Motor 4 = Encoder index 3
 
 // ================= PID VARS =================
 
@@ -74,16 +76,11 @@ double in2 = 0, out2 = 0, sp2 = 0;
 double in3 = 0, out3 = 0, sp3 = 0;
 
 // ================= PID CONTROLLERS =================
-// Ganhos reduzidos para evitar oscilação
+// Ganhos aumentados para melhor resposta
 
-// Motor 1 - suavizado
-PID pid1(&in1, &out1, &sp1, 0.5, 0.01, 0.0, DIRECT);
-
-// Motor 2 - suavizado mas um pouco mais forte
-PID pid2(&in2, &out2, &sp2, 0.5, 0.01, 0.0, DIRECT);
-
-// Motor 3 - bem suavizado (era o mais forte)
-PID pid3(&in3, &out3, &sp3, 0.5, 0.01, 0.0, DIRECT);
+PID pid1(&in1, &out1, &sp1, 1.0, 0.05, 0.0, DIRECT);
+PID pid2(&in2, &out2, &sp2, 1.0, 0.05, 0.0, DIRECT);
+PID pid3(&in3, &out3, &sp3, 1.0, 0.05, 0.0, DIRECT);
 
 // ================= FUNÇÕES AUX =================
 
@@ -99,42 +96,44 @@ spdWheels conversion(float lx, float ly, float rx)
     // --- PADRONIZAÇÃO DE EIXOS ---
     // lx (horizontal) -> v_lateral (Eixo X)
     // ly (vertical)   -> v_frontal (Eixo Y)
-    float vx = lx * sMax; 
-    float vy = ly * sMax; 
-    float w  = rx * rMax; 
+    float vx = lx * sMax;
+    float vy = ly * sMax;
+    float w = rx * rMax;
 
     vx = deadzone(vx, 0.03f);
     vy = deadzone(vy, 0.03f);
-    w  = deadzone(w, 0.03f);
+    w = deadzone(w, 0.03f);
 
     const float r = radius;
     const float L = center;
 
-    // --- GEOMETRIA ---
-    // Coloca a Roda 1 exatamente atrás (270 graus ou 3*PI/2)
-    float offset = (3.0f * M_PI) / 2.0f; 
-
     spdWheels spd;
 
-    // Ângulos das rodas (0, 120 e 240 graus + o deslocamento)
-    float a1 = 0.0f + offset;                   // 270° (Atrás)
-    float a2 = (2.0f * M_PI / 3.0f) + offset;   // 30°  (Frente-Esquerda)
-    float a3 = (4.0f * M_PI / 3.0f) + offset;   // 150° (Frente-Direita)
+    // ===== CINEMÁTICA CORRETA PARA 3 RODAS OMNIDIRECIONAIS =====
+    // Configuração física:
+    //   - Roda 1: 270° (atrás, centralizada)
+    //   - Roda 2: 30°  (frente-esquerda)
+    //   - Roda 3: 150° (frente-direita)
+    //
+    // Fórmula: Wi = (-sin(α) * Vx + cos(α) * Vy + L * w) / r
+    //
+    // Simplificada com valores trigonométricos calculados:
 
-    // --- CINEMÁTICA INVERSA ---
-    // A fórmula correta para robôs omni de 3 rodas:
-    // Wi = (-sin(alpha) * Vx + cos(alpha) * Vy + L * w) / r
+    // Roda 1 (270°): sin(270°)=-1, cos(270°)=0
+    spd.w1 = (vx + L * w) / r;
     
-    spd.w1 = (-sin(a1) * vx + cos(a1) * vy + L * w) / r;
-    spd.w2 = (-sin(a2) * vx + cos(a2) * vy + L * w) / r;
-    spd.w3 = (-sin(a3) * vx + cos(a3) * vy + L * w) / r;
+    // Roda 2 (30°): sin(30°)=0.5, cos(30°)=0.866
+    spd.w2 = (-0.5f * vx + 0.866f * vy + L * w) / r;
+    
+    // Roda 3 (150°): sin(150°)=0.5, cos(150°)=-0.866
+    spd.w3 = (-0.5f * vx - 0.866f * vy + L * w) / r;
 
     return spd;
 }
 
 void setMotor(int IN1, int IN2, int pwmPin, float controlValue)
 {
-    const int PWM_MIN = 30; // PWM mínimo aumentado
+    const int PWM_MIN = 30;
 
     if (controlValue > 255)
         controlValue = 255;
@@ -143,18 +142,17 @@ void setMotor(int IN1, int IN2, int pwmPin, float controlValue)
 
     int pwm = abs((int)controlValue);
 
-    // Se PWM muito baixo, zerar completamente para evitar tremor
     if (pwm > 0 && pwm < PWM_MIN)
     {
-        pwm = 0; // Mudado: ao invés de forçar PWM_MIN, zera
+        pwm = PWM_MIN;
     }
 
-    if (controlValue > 1.0f)
+    if (controlValue > 0)
     {
         gpioWrite(IN1, PI_HIGH);
         gpioWrite(IN2, PI_LOW);
     }
-    else if (controlValue < -1.0f)
+    else if (controlValue < 0)
     {
         gpioWrite(IN1, PI_LOW);
         gpioWrite(IN2, PI_HIGH);
@@ -191,6 +189,74 @@ void stopMotorSimple(int IN1, int IN2, int pwmPin)
     gpioPWM(pwmPin, 0);
 }
 
+// ================= TESTE DE MOTORES =================
+
+void testarMotoresIndividualmente()
+{
+    std::cout << "\n=== TESTE DE MOTORES E ENCODERS ===" << std::endl;
+    std::cout << "Este teste vai girar cada motor e verificar se o encoder" << std::endl;
+    std::cout << "está lendo na direção correta (valor POSITIVO esperado)." << std::endl;
+    std::cout << "\nPressione ENTER para iniciar..." << std::endl;
+    std::cin.get();
+    
+    // Teste Motor 1
+    std::cout << "\n--- Motor 1 ---" << std::endl;
+    std::cout << "Girando motor em PWM +100..." << std::endl;
+    enc1.reset();
+    setMotor(M1_IN1, M1_IN2, M1_PWM, 100);
+    gpioDelay(2000000); // 2 segundos
+    float speed1 = enc1.getSpeed();
+    long pos1 = enc1.getPosition();
+    setMotor(M1_IN1, M1_IN2, M1_PWM, 0);
+    std::cout << "Velocidade: " << speed1 << " pulsos/s" << std::endl;
+    std::cout << "Posição: " << pos1 << " pulsos" << std::endl;
+    if (speed1 < 0 || pos1 < 0) {
+        std::cout << "⚠️  ATENÇÃO: Encoder NEGATIVO! Inverta os fios do Encoder 0 no Arduino Nano!" << std::endl;
+    } else {
+        std::cout << "✓ Motor 1 OK" << std::endl;
+    }
+    gpioDelay(1000000);
+    
+    // Teste Motor 2
+    std::cout << "\n--- Motor 2 ---" << std::endl;
+    std::cout << "Girando motor em PWM +100..." << std::endl;
+    enc2.reset();
+    setMotor(M2_IN1, M2_IN2, M2_PWM, 100);
+    gpioDelay(2000000);
+    float speed2 = enc2.getSpeed();
+    long pos2 = enc2.getPosition();
+    setMotor(M2_IN1, M2_IN2, M2_PWM, 0);
+    std::cout << "Velocidade: " << speed2 << " pulsos/s" << std::endl;
+    std::cout << "Posição: " << pos2 << " pulsos" << std::endl;
+    if (speed2 < 0 || pos2 < 0) {
+        std::cout << "⚠️  ATENÇÃO: Encoder NEGATIVO! Inverta os fios do Encoder 1 no Arduino Nano!" << std::endl;
+    } else {
+        std::cout << "✓ Motor 2 OK" << std::endl;
+    }
+    gpioDelay(1000000);
+    
+    // Teste Motor 3
+    std::cout << "\n--- Motor 3 ---" << std::endl;
+    std::cout << "Girando motor em PWM +100..." << std::endl;
+    enc3.reset();
+    setMotor(M3_IN1, M3_IN2, M3_PWM, 100);
+    gpioDelay(2000000);
+    float speed3 = enc3.getSpeed();
+    long pos3 = enc3.getPosition();
+    setMotor(M3_IN1, M3_IN2, M3_PWM, 0);
+    std::cout << "Velocidade: " << speed3 << " pulsos/s" << std::endl;
+    std::cout << "Posição: " << pos3 << " pulsos" << std::endl;
+    if (speed3 < 0 || pos3 < 0) {
+        std::cout << "⚠️  ATENÇÃO: Encoder NEGATIVO! Inverta os fios do Encoder 2 no Arduino Nano!" << std::endl;
+    } else {
+        std::cout << "✓ Motor 3 OK" << std::endl;
+    }
+    
+    std::cout << "\n=== FIM DO TESTE ===" << std::endl;
+    std::cout << "Pressione ENTER para iniciar o sistema normal..." << std::endl;
+    std::cin.get();
+}
+
 // ================= MAIN =================
 
 int main()
@@ -198,7 +264,7 @@ int main()
     if (gpioInitialise() < 0)
         return 1;
 
-    // Motores 1, 2, 3
+    // Configura apenas os pinos dos MOTORES (não mais os encoders)
     gpioSetMode(M1_IN1, PI_OUTPUT);
     gpioSetMode(M1_IN2, PI_OUTPUT);
     gpioSetMode(M1_PWM, PI_OUTPUT);
@@ -211,7 +277,6 @@ int main()
     gpioSetMode(M3_IN2, PI_OUTPUT);
     gpioSetMode(M3_PWM, PI_OUTPUT);
 
-    // Motor 4 (subida)
     gpioSetMode(M4_IN1, PI_OUTPUT);
     gpioSetMode(M4_IN2, PI_OUTPUT);
     gpioSetMode(M4_PWM, PI_OUTPUT);
@@ -226,15 +291,60 @@ int main()
     gpioSetPWMrange(M3_PWM, 255);
     gpioSetPWMrange(M4_PWM, 255);
 
-    // Encoders
+    gpioSetMode(limite, PI_INPUT);
+    gpioSetPullUpDown(limite, PI_PUD_UP);
+
+    // Arduino de sensores
+    int arduinoFd = configurarSerial("/dev/ttyACM0");
+    if (arduinoFd == -1)
+    {
+        std::cerr << "Erro ao abrir porta serial do Arduino de sensores!" << std::endl;
+    }
+    else
+    {
+        std::cout << "Arduino de sensores OK!" << std::endl;
+    }
+
+    // ===== INICIALIZA ARDUINO NANO DOS ENCODERS VIA UART =====
+    std::cout << "\n=== INICIALIZANDO ARDUINO NANO (ENCODERS via UART) ===" << std::endl;
+    
+    // Tenta conectar na UART (TX/RX físico da Raspberry)
+    // Portas comuns: /dev/serial0, /dev/ttyS0, /dev/ttyAMA0
+    if (!Encoder::iniciarComunicacaoSerial("/dev/serial0")) {
+        std::cout << "Tentativa /dev/serial0 falhou, tentando /dev/ttyS0..." << std::endl;
+        if (!Encoder::iniciarComunicacaoSerial("/dev/ttyS0")) {
+            std::cout << "Tentativa /dev/ttyS0 falhou, tentando /dev/ttyAMA0..." << std::endl;
+            if (!Encoder::iniciarComunicacaoSerial("/dev/ttyAMA0")) {
+                std::cerr << "\n❌ ERRO FATAL: Não foi possível conectar à UART do Arduino!" << std::endl;
+                std::cerr << "\nVerifique:" << std::endl;
+                std::cerr << "  1. UART habilitada no raspi-config (Interface Options -> Serial Port)" << std::endl;
+                std::cerr << "     - Shell acessível via serial: NÃO" << std::endl;
+                std::cerr << "     - Hardware serial habilitado: SIM" << std::endl;
+                std::cerr << "  2. Conexões físicas:" << std::endl;
+                std::cerr << "     Arduino TX (pino 1)  -> Raspberry RX (GPIO 15, pino 10)" << std::endl;
+                std::cerr << "     Arduino RX (pino 0)  -> Raspberry TX (GPIO 14, pino 8)" << std::endl;
+                std::cerr << "     Arduino GND          -> Raspberry GND" << std::endl;
+                std::cerr << "  3. Arduino com código dos encoders carregado" << std::endl;
+                std::cerr << "  4. Execute 'ls -l /dev/serial*' para verificar dispositivos disponíveis\n" << std::endl;
+                
+                gpioTerminate();
+                return 1;
+            }
+        }
+    }
+
+    // Inicializa os encoders (apenas reseta variáveis internas)
     enc1.begin();
     enc2.begin();
     enc3.begin();
     enc4.begin();
 
-    gpioDelay(100000); // 100ms para estabilizar
+    gpioDelay(100000);
 
-    // PID
+    // ===== EXECUTAR TESTE DE MOTORES =====
+    // Comente a linha abaixo após o primeiro teste
+    testarMotoresIndividualmente();
+
     pid1.SetOutputLimits(-255, 255);
     pid2.SetOutputLimits(-255, 255);
     pid3.SetOutputLimits(-255, 255);
@@ -251,10 +361,29 @@ int main()
 
     const float RAD_TO_PULSE = CPR_EFFECTIVE / (2.0f * M_PI);
 
-    std::cout << "Sistema iniciado!" << std::endl;
+    std::cout << "\n=== SISTEMA INICIADO ===" << std::endl;
     std::cout << "RAD_TO_PULSE: " << RAD_TO_PULSE << std::endl;
+    std::cout << "Configuração:" << std::endl;
+    std::cout << "  - Roda 1: Atrás (270°)" << std::endl;
+    std::cout << "  - Roda 2: Frente-Esquerda (30°)" << std::endl;
+    std::cout << "  - Roda 3: Frente-Direita (150°)" << std::endl;
+    std::cout << "  - sMax: " << sMax << " m/s" << std::endl;
+    std::cout << "  - rMax: " << rMax << " rad/s" << std::endl;
+    std::cout << "========================\n" << std::endl;
 
     int loopCount = 0;
+
+    int pinca_angulo = 50;
+    int angulo_angulo = 0;
+
+    bool dLeftPressed = false;
+    bool dRightPressed = false;
+    bool dUpPressed = false;
+    bool dDownPressed = false;
+    bool trianglePressed = false;
+
+    bool monitorSensor = false;
+    unsigned long lastPrint = 0;
 
     while (true)
     {
@@ -264,69 +393,121 @@ int main()
         float ly = c.ly;
         float rx = c.rx;
 
-        // D-pad tem prioridade (apenas para movimento omni)
-        if (c.dUp)
+        bool fimCursoAtivo = (gpioRead(limite) == PI_LOW);
+
+        // Toggle monitor de sensores
+        if (c.triangle && !trianglePressed)
         {
-            ly = 1;
-            lx = 0;
-            rx = 0;
+            monitorSensor = !monitorSensor;
+            std::cout << "\n=== MONITOR DE SENSORES "
+                      << (monitorSensor ? "LIGADO" : "DESLIGADO")
+                      << " ===\n" << std::endl;
+            trianglePressed = true;
         }
-        if (c.dDown)
+        else if (!c.triangle)
         {
-            ly = -1;
-            lx = 0;
-            rx = 0;
-        }
-        if (c.dLeft)
-        {
-            lx = -1;
-            ly = 0;
-            rx = 0;
-        }
-        if (c.dRight)
-        {
-            lx = 1;
-            ly = 0;
-            rx = 0;
+            trianglePressed = false;
         }
 
-        // ===== CONTROLE DO MOTOR 4 (SUBIDA) =====
+        // Controle da pinça - Esquerda: Fechar
+        if (c.dLeft && !dLeftPressed)
+        {
+            pinca_angulo = 3;
+            if (arduinoFd != -1)
+                enviarServos(arduinoFd, pinca_angulo, angulo_angulo);
+            dLeftPressed = true;
+        }
+        else if (!c.dLeft)
+        {
+            dLeftPressed = false;
+        }
+
+        // Monitor de sensores
+        if (monitorSensor && arduinoFd != -1)
+        {
+            unsigned long now = gpioTick();
+            if (now - lastPrint >= 300000)
+            {
+                lastPrint = now;
+                std::string dados = lerSensores(arduinoFd);
+                std::cout << "\r[SENSORES] " << dados << "        " << std::flush;
+            }
+        }
+
+        // Controle da pinça - Direita: Abrir
+        if (c.dRight && !dRightPressed)
+        {
+            pinca_angulo = 50;
+            if (arduinoFd != -1)
+                enviarServos(arduinoFd, pinca_angulo, angulo_angulo);
+            dRightPressed = true;
+        }
+        else if (!c.dRight)
+        {
+            dRightPressed = false;
+        }
+
+        // Controle do ângulo - Cima
+        if (c.dUp && !dUpPressed)
+        {
+            angulo_angulo += SERVO_STEP;
+            if (angulo_angulo > SERVO_2_MAX)
+                angulo_angulo = SERVO_2_MAX;
+            if (arduinoFd != -1)
+                enviarServos(arduinoFd, pinca_angulo, angulo_angulo);
+            dUpPressed = true;
+        }
+        else if (!c.dUp)
+        {
+            dUpPressed = false;
+        }
+
+        // Controle do ângulo - Baixo
+        if (c.dDown && !dDownPressed)
+        {
+            angulo_angulo -= SERVO_STEP;
+            if (angulo_angulo < SERVO_2_MIN)
+                angulo_angulo = SERVO_2_MIN;
+            if (arduinoFd != -1)
+                enviarServos(arduinoFd, pinca_angulo, angulo_angulo);
+            dDownPressed = true;
+        }
+        else if (!c.dDown)
+        {
+            dDownPressed = false;
+        }
+
+        // Motor 4 (elevador)
         if (c.l1)
         {
-            // L1 pressionado - subir
             setMotorSimple(M4_IN1, M4_IN2, M4_PWM, 255, true);
         }
-        else if (c.l2)
+        else if (c.l2 && !fimCursoAtivo)
         {
-            // L2 pressionado - descer
             setMotorSimple(M4_IN1, M4_IN2, M4_PWM, 255, false);
         }
         else
         {
-            // Nenhum botão - parar motor 4
             stopMotorSimple(M4_IN1, M4_IN2, M4_PWM);
         }
 
-        // ===== CONTROLE DOS MOTORES 1, 2, 3 (COM PID) =====
+        // Cinemática e controle PID
         spdWheels s = conversion(lx, ly, rx);
 
-        // Setpoints em pulsos/segundo
         sp1 = s.w1 * RAD_TO_PULSE;
         sp2 = s.w2 * RAD_TO_PULSE;
         sp3 = s.w3 * RAD_TO_PULSE;
 
-        // Leitura dos encoders
         in1 = enc1.getSpeed();
         in2 = enc2.getSpeed();
-        in3 = enc3.getSpeed();
+        in3 = -enc3.getSpeed();
 
-        // Se setpoint muito pequeno, zerar tudo e resetar PID
+        // Motor 1
         if (std::abs(sp1) < 10.0f)
-        { // Threshold aumentado
+        {
+            sp1 = 0;
             out1 = 0;
             setMotor(M1_IN1, M1_IN2, M1_PWM, 0);
-            pid1.SetMode(MANUAL);
-            pid1.SetMode(AUTOMATIC); // Reset
         }
         else
         {
@@ -334,12 +515,12 @@ int main()
             setMotor(M1_IN1, M1_IN2, M1_PWM, out1);
         }
 
+        // Motor 2
         if (std::abs(sp2) < 10.0f)
-        { // Threshold aumentado
+        {
+            sp2 = 0;
             out2 = 0;
             setMotor(M2_IN1, M2_IN2, M2_PWM, 0);
-            pid2.SetMode(MANUAL);
-            pid2.SetMode(AUTOMATIC);
         }
         else
         {
@@ -347,12 +528,12 @@ int main()
             setMotor(M2_IN1, M2_IN2, M2_PWM, out2);
         }
 
+        // Motor 3
         if (std::abs(sp3) < 10.0f)
-        { // Threshold aumentado
+        {
+            sp3 = 0;
             out3 = 0;
             setMotor(M3_IN1, M3_IN2, M3_PWM, 0);
-            pid3.SetMode(MANUAL);
-            pid3.SetMode(AUTOMATIC);
         }
         else
         {
@@ -360,7 +541,7 @@ int main()
             setMotor(M3_IN1, M3_IN2, M3_PWM, out3);
         }
 
-        // Debug a cada 50 loops (~1 segundo)
+        // Debug a cada 50 loops
         if (loopCount++ % 50 == 0)
         {
             std::cout << "M1: sp=" << (int)sp1 << " in=" << (int)in1 << " out=" << (int)out1
@@ -369,15 +550,18 @@ int main()
                       << " pos=" << enc2.getPosition() << std::endl;
             std::cout << "M3: sp=" << (int)sp3 << " in=" << (int)in3 << " out=" << (int)out3
                       << " pos=" << enc3.getPosition() << std::endl;
-            std::cout << "M4: speed=" << (int)enc4.getSpeed() 
-                      << " pos=" << enc4.getPosition() 
-                      << " (L1=" << c.l1 << " L2=" << c.l2 << ")" << std::endl;
+            std::cout << "M4: speed=" << (int)enc4.getSpeed()
+                      << " pos=" << enc4.getPosition()
+                      << " L1=" << c.l1 << " L2=" << c.l2
+                      << " FimCurso=" << (fimCursoAtivo ? "ATIVO" : "inativo") << std::endl;
+            std::cout << "Servos: S1=" << pinca_angulo << "° S2=" << angulo_angulo << "°" << std::endl;
             std::cout << "---" << std::endl;
         }
 
         gpioDelay(20000); // 20 ms
     }
 
+    Encoder::pararComunicacaoSerial();
     gpioTerminate();
     return 0;
 }
