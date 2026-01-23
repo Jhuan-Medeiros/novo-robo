@@ -18,6 +18,11 @@ static std::atomic<int> g_dDown{0};
 static std::atomic<int> g_dLeft{0};
 static std::atomic<int> g_dRight{0};
 
+static std::atomic<int> g_triangle{0};
+static std::atomic<int> g_l1{0};
+static std::atomic<int> g_l2{0};
+
+
 static void loopRecepcao()
 {
     int sock = socket(AF_INET, SOCK_DGRAM, 0);
@@ -37,8 +42,9 @@ static void loopRecepcao()
         if (n > 0) {
             buf[n] = '\0';
             float lx, ly, rx, ry;
-            int up, down, left, right;
-            if (sscanf(buf, "%f,%f,%f,%f,%d,%d,%d,%d", &lx, &ly, &rx, &ry, &up, &down, &left, &right) == 8) {
+            int up, down, left, right, triangle, l1, l2;
+            if (sscanf(buf, "%f,%f,%f,%f,%d,%d,%d,%d,%d,%d,%d", 
+                       &lx, &ly, &rx, &ry, &up, &down, &left, &right, &triangle, &l1, &l2) == 11) {
                 g_lx = lx;
                 g_ly = ly;
                 g_rx = rx;
@@ -49,6 +55,9 @@ static void loopRecepcao()
                 g_dLeft = left;
                 g_dRight = right;
 
+                g_triangle = triangle;
+                g_l1 = l1;
+                g_l2 = l2;
             }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -71,6 +80,10 @@ controleState lerControle()
         g_dUp.load(),
         g_dDown.load(),
         g_dLeft.load(),
-        g_dRight.load()
+        g_dRight.load(),
+
+        g_triangle.load(),
+        g_l1.load(),
+        g_l2.load()
     };
 }
