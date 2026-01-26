@@ -9,7 +9,6 @@
 #include <mutex>
 #include <algorithm>
 
-// Estrutura para armazenar os dados dos sensores
 struct DadosSensores {
     float ultraEsq = 0.0f;
     float ultraDir = 0.0f;
@@ -19,13 +18,11 @@ struct DadosSensores {
     bool valido = false;
 };
 
-// Variáveis globais thread-safe
 static std::atomic<bool> threadAtiva{false};
 static std::mutex dadosMutex;
 static DadosSensores dadosAtuais;
 static int serialFd = -1;
 
-// Thread de leitura contínua
 static void threadLeituraSerial() {
     std::string buffer;
     char temp[256];
@@ -37,22 +34,18 @@ static void threadLeituraSerial() {
             temp[n] = '\0';
             buffer += std::string(temp);
             
-            // Processa todas as linhas completas
             size_t pos;
             while ((pos = buffer.find('\n')) != std::string::npos) {
                 std::string linha = buffer.substr(0, pos);
                 buffer.erase(0, pos + 1);
                 
-                // Remove \r e espaços
                 linha.erase(std::remove_if(linha.begin(), linha.end(), 
                     [](char c) { return c == '\r' || c == ' ' || c == '\t'; }), linha.end());
                 
-                // Parse da linha: distEsq,distDir,laserF,laserT,linha
                 float ue, ud;
                 int lf, lt, el;
                 
                 if (sscanf(linha.c_str(), "%f,%f,%d,%d,%d", &ue, &ud, &lf, &lt, &el) == 5) {
-                    // Atualiza dados de forma thread-safe
                     std::lock_guard<std::mutex> lock(dadosMutex);
                     dadosAtuais.ultraEsq = ue;
                     dadosAtuais.ultraDir = ud;
@@ -63,14 +56,12 @@ static void threadLeituraSerial() {
                 }
             }
             
-            // Limita buffer
             if (buffer.length() > 512) {
                 buffer.clear();
             }
         }
         
-        // Delay mínimo para não sobrecarregar CPU
-        usleep(1000); // 1ms
+        usleep(1000);
     }
 }
 
