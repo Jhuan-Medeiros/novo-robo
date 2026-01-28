@@ -15,6 +15,7 @@ struct controleState
     int triangle;
     int l1;
     int l2;
+    int share;  // <--- NOVO: Botão SHARE
 };
 
 void iniciarRecepcaoControle();

@@ -40,7 +40,11 @@ while True:
     l2_axis = joy.get_axis(4)
     l2 = 1 if l2_axis > 0.1 else 0  # Se apertar > 10%, considera pressionado
     
-    msg = f"{lx:.3f},{ly:.3f},{rx:.3f},{ry:.3f},{dUp},{dDown},{dLeft},{dRight},{triangle},{l1},{l2}"
+    # SHARE - Botão 8 no PS4 (à esquerda do touchpad)
+    share = joy.get_button(8)
+    
+    # Formato: lx,ly,rx,ry,dUp,dDown,dLeft,dRight,triangle,l1,l2,share
+    msg = f"{lx:.3f},{ly:.3f},{rx:.3f},{ry:.3f},{dUp},{dDown},{dLeft},{dRight},{triangle},{l1},{l2},{share}"
     sock.sendto(msg.encode(), (IP_RASP, PORTA))
     
     clock.tick(60)

@@ -7,6 +7,7 @@
 #include <algorithm>
 // ===== BIBLIOTECAS ADICIONAIS =====
 #include "../modules/arduino/arduinoSerial.h"
+#include "../modules/camera/cameraReceive.h"
 
 // ================= PINOS =================
 
@@ -278,10 +279,12 @@ void homing(motor &m, int &estado, bool sensorAtivo)
         {
             stopMotorSimple(m.in1, m.in2, m.pwmPin);
             m.pos = 0;
-            std::cout << "Zero encontrado" std::endl;
-            gpioDelay(2000);
-            estado = 0;
+            std::cout << "Zero encontrado" << std::endl;
+            gpioDelay(200000);
+            estado = 2;
         }
+    case 2:
+        break;
     }
 }
 
@@ -316,6 +319,7 @@ spdWheels conversion(float lx, float ly, float rx)
 
 int main()
 {
+
     if (gpioInitialise() < 0)
         return 1;
 
@@ -341,26 +345,55 @@ int main()
         std::cout << "Arduino OK!" << std::endl;
 
     iniciarRecepcaoControle();
+    iniciarRecepcaoCamera();
 
-    std::cout << "\n=== SISTEMA OMNI INTEGRADO ===" << std::endl;
-    std::cout << "Modo: PID Hibrido + Sensores + Pinca + Debug M4" << std::endl;
+    std::cout << "\n=== SISTEMA OMNI INTEGRADO COM VISÃO ===" << std::endl;
+    std::cout << "Modo: PID Hibrido + Sensores + Pinça + CÂMERA" << std::endl;
+    std::cout << "\nControles:" << std::endl;
+    std::cout << "  - SHARE: Ativa/Desativa modo câmera" << std::endl;
+    std::cout << "  - L1: Sobe elevador" << std::endl;
+    std::cout << "  - L2: Desce elevador" << std::endl;
+    std::cout << "  - TRIANGLE: Monitor de sensores" << std::endl;
+    std::cout << "  - D-PAD: Controle dos servos\n"
+              << std::endl;
 
     int loopCount = 0;
     int pinca_angulo = 50;
     int angulo_angulo = 0;
 
+    int estadoElevador = 0;
+
     bool dLeftPressed = false, dRightPressed = false;
     bool dUpPressed = false, dDownPressed = false;
 
-    // NOVAS VARIAVEIS PARA OS SENSORES
+    // VARIÁVEIS PARA OS SENSORES
     bool trianglePressed = false;
     bool monitorSensor = false;
-    uint32_t lastPrint = 0;
+
+    // VARIÁVEIS PARA CÂMERA
+    bool modoCamera = false;
+    bool sharePressed = false;
 
     while (true)
     {
         controleState c = lerControle();
+        CameraState cam = lerCamera();
         bool fimCursoAtivo = (gpioRead(limite) == PI_LOW);
+
+        // ===== LÓGICA DO SHARE (MODO CÂMERA) =====
+        if (c.share && !sharePressed)
+        {
+            modoCamera = !modoCamera;
+            std::cout << "\n========================================" << std::endl;
+            std::cout << "  🎥 MODO CÂMERA: " << (modoCamera ? "ATIVADO ✓" : "DESATIVADO ✗") << std::endl;
+            std::cout << "========================================\n"
+                      << std::endl;
+            sharePressed = true;
+        }
+        else if (!c.share)
+        {
+            sharePressed = false;
+        }
 
         // ===== LÓGICA DO TRIANGULO (SENSORES) =====
         if (c.triangle && !trianglePressed)
@@ -426,27 +459,80 @@ int main()
             dDownPressed = false;
 
         // ===== MOTOR 4 (ELEVADOR) =====
+        // L1 SOBE (forward=true) | L2 DESCE (forward=false)
         updateMotorSpeed(&motors[3]);
 
-        if (c.l1)
-        {
-            setMotorSimple(M4_IN1, M4_IN2, M4_PWM, 255, true);
-        }
-        else if (c.l2 && !fimCursoAtivo)
-        {
-            setMotorSimple(M4_IN1, M4_IN2, M4_PWM, 255, false);
-        }
-        else
-        {
-            stopMotorSimple(M4_IN1, M4_IN2, M4_PWM);
-        }
+        homing(motors[3], estadoElevador, fimCursoAtivo);
 
-        if(fimCursoAtivo) {
-            motors[3].pos = 0;
+        if (estadoElevador == 2)
+        {
+            if (c.l1)
+            {
+                // L1 SOBE
+                setMotorSimple(M4_IN1, M4_IN2, M4_PWM, 255, true);
+            }
+            else if (c.l2 && !fimCursoAtivo)
+            {
+                // L2 DESCE (só se não estiver no fim de curso)
+                setMotorSimple(M4_IN1, M4_IN2, M4_PWM, 255, false);
+            }
+            else
+            {
+                stopMotorSimple(M4_IN1, M4_IN2, M4_PWM);
+
+                if (fimCursoAtivo)
+                {
+                    motors[3].pos = 0;
+                }
+            }
         }
 
         // ===== OMNI WHEELS =====
-        spdWheels s = conversion(c.lx, c.ly, c.rx);
+        spdWheels s;
+
+        if (modoCamera)
+        {
+            float vx_auto = 0.0f;
+            float rot_auto = 0.0f;
+
+            // 🔍 DEBUG COMPLETO
+            std::cout << "\n🔍 DEBUG CAMERA STATE:" << std::endl;
+            std::cout << "   cam.comando = '" << cam.comando << "' (ASCII: " << (int)cam.comando << ")" << std::endl;
+            std::cout << "   cam.erro_x = " << cam.erro_x << std::endl;
+            std::cout << "   cam.distancia = " << cam.distancia << std::endl;
+            std::cout << "   cam.alvo_detectado = " << cam.alvo_detectado << std::endl;
+
+            if (cam.comando == 'D')
+            {
+                vx_auto = 0.6f;
+                std::cout << "   ➡️ MOVENDO DIREITA (vx=0.6)" << std::endl;
+            }
+            else if (cam.comando == 'E')
+            {
+                vx_auto = -0.6f;
+                std::cout << "   ⬅️ MOVENDO ESQUERDA (vx=-0.6)" << std::endl;
+            }
+            else if (cam.comando == 'P')
+            {
+                vx_auto = 0.0f;
+                std::cout << "   ✅ PARADO (alinhado)" << std::endl;
+            }
+            else // cmd == 'N' ou qualquer outro
+            {
+                rot_auto = 0.3f;
+                std::cout << "   🔄 PROCURANDO (rot=0.3, comando='" << cam.comando << "')" << std::endl;
+            }
+
+            s = conversion(vx_auto, 0.0f, rot_auto);
+
+            std::cout << "   Targets: w1=" << (int)(s.w1 * RAD_TO_PULSE)
+                      << " w2=" << (int)(s.w2 * RAD_TO_PULSE)
+                      << " w3=" << (int)(s.w3 * RAD_TO_PULSE) << std::endl;
+        }
+        else
+        {
+            s = conversion(c.lx, c.ly, c.rx);
+        }
 
         float out1 = computeHybridControl(&motors[0], s.w1 * RAD_TO_PULSE);
         float out2 = computeHybridControl(&motors[1], s.w2 * RAD_TO_PULSE);
@@ -456,9 +542,9 @@ int main()
         setMotorPWM(&motors[1], out2);
         setMotorPWM(&motors[2], out3);
 
-        // ===== DEBUG / IMPRESSÃO (CORRIGIDO) =====
+        // ===== DEBUG / IMPRESSÃO =====
 
-        if (loopCount++ % 50 == 0) // Incrementa SEMPRE, a cada loop
+        if (loopCount++ % 50 == 0)
         {
             if (monitorSensor && arduinoFd != -1)
             {
@@ -482,6 +568,17 @@ int main()
                           << " FimCurso=" << (fimCursoAtivo ? "ATIVO" : "OFF") << std::endl;
                 std::cout << "Servos: Pinca=" << pinca_angulo
                           << "° Angulo=" << angulo_angulo << "°" << std::endl;
+
+                // Debug da câmera quando ativa
+                if (modoCamera)
+                {
+                    std::cout << "📷 CAM: Cmd=" << cam.comando
+                              << " | Erro=" << cam.erro_x << "px"
+                              << " | Dist~" << cam.distancia << "cm"
+                              << " | Alvo=" << (cam.alvo_detectado ? "✓" : "✗")
+                              << std::endl;
+                }
+
                 std::cout << "---" << std::endl;
             }
         }

@@ -21,6 +21,7 @@ static std::atomic<int> g_dRight{0};
 static std::atomic<int> g_triangle{0};
 static std::atomic<int> g_l1{0};
 static std::atomic<int> g_l2{0};
+static std::atomic<int> g_share{0};  // <--- NOVO
 
 
 static void loopRecepcao()
@@ -42,9 +43,11 @@ static void loopRecepcao()
         if (n > 0) {
             buf[n] = '\0';
             float lx, ly, rx, ry;
-            int up, down, left, right, triangle, l1, l2;
-            if (sscanf(buf, "%f,%f,%f,%f,%d,%d,%d,%d,%d,%d,%d", 
-                       &lx, &ly, &rx, &ry, &up, &down, &left, &right, &triangle, &l1, &l2) == 11) {
+            int up, down, left, right, triangle, l1, l2, share;
+            
+            // Parse: lx,ly,rx,ry,dUp,dDown,dLeft,dRight,triangle,l1,l2,share
+            if (sscanf(buf, "%f,%f,%f,%f,%d,%d,%d,%d,%d,%d,%d,%d", 
+                       &lx, &ly, &rx, &ry, &up, &down, &left, &right, &triangle, &l1, &l2, &share) == 12) {
                 g_lx = lx;
                 g_ly = ly;
                 g_rx = rx;
@@ -58,6 +61,7 @@ static void loopRecepcao()
                 g_triangle = triangle;
                 g_l1 = l1;
                 g_l2 = l2;
+                g_share = share;  // <--- NOVO
             }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -84,6 +88,7 @@ controleState lerControle()
 
         g_triangle.load(),
         g_l1.load(),
-        g_l2.load()
+        g_l2.load(),
+        g_share.load()  // <--- NOVO
     };
 }
