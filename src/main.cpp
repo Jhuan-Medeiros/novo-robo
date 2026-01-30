@@ -20,8 +20,8 @@
 #define M2_IN1 21
 #define M2_IN2 20
 #define M2_PWM 16
-#define M2_C1 1
-#define M2_C2 7
+#define M2_C1 7
+#define M2_C2 1
 
 #define M3_IN1 11
 #define M3_IN2 9
@@ -41,15 +41,15 @@
 
 const float center = 0.103f;
 const float radius = 0.033f;
-const float sMax = 0.25f;
+const float sMax = 0.20f;
 const float rMax = 1.0f;
 const float CPR = 472.0f;
 const float RAD_TO_PULSE = CPR / (2.0f * M_PI);
 
-const int SERVO_1_MIN = 3;
-const int SERVO_1_MAX = 55;
-const int SERVO_2_MIN = 0;
-const int SERVO_2_MAX = 60;
+const int SERVO_1_MIN = 3;  // Pinça aberta
+const int SERVO_1_MAX = 55; // Pinça fechada
+const int SERVO_2_MIN = 0;  // Ângulo mínimo (baixo)
+const int SERVO_2_MAX = 60; // Ângulo máximo (alto)
 const int SERVO_STEP = 10;
 
 // ================= ESTRUTURAS AVANÇADAS =================
@@ -79,6 +79,22 @@ struct motor
     int minPWM;
 };
 
+// ================= ESTADOS DA SEQUÊNCIA AUTOMÁTICA =================
+enum EstadoSequencia
+{
+    SEQ_IDLE = 0,         // Aguardando
+    SEQ_ALINHANDO,        // Alinhando com ArUco
+    SEQ_SUBINDO_120,     // Subindo elevador 3000 passos
+    SEQ_ABRINDO_GARRA,    // Abrindo garra
+    SEQ_FECHANDO_GARRA,   // Fechando garra
+    SEQ_LEVANTANDO_GARRA, // Levantando garra ao máximo
+    SEQ_AGUARDANDO_3S,    // Esperando 3 segundos
+    SEQ_SUBINDO_7880,     // Subindo mais 5000 passos
+    SEQ_DESCENDO_GARRA,   // Descendo garra ao mínimo
+    SEQ_ABRINDO_FINAL,    // Abrindo garra final
+    SEQ_COMPLETO          // Sequência completa
+};
+
 // ================= QUADRATURA =================
 
 const int8_t quadTable[16] = {
@@ -88,19 +104,11 @@ const int8_t quadTable[16] = {
     0, +1, -1, 0};
 
 // ================= INICIALIZAÇÃO DOS MOTORES =================
-
 motor motors[4] = {
-    {M1_IN1, M1_IN2, M1_PWM, M1_C1, M1_C2, 0, 0, 0, 0, 0.0f, 0.0f,
-     0.2f, 0.5f, 35},
-
-    {M2_IN1, M2_IN2, M2_PWM, M2_C1, M2_C2, 0, 0, 0, 0, 0.0f, 0.0f,
-     0.2f, 0.6f, 50},
-
-    {M3_IN1, M3_IN2, M3_PWM, M3_C1, M3_C2, 0, 0, 0, 0, 0.0f, 0.0f,
-     0.2f, 0.5f, 35},
-
-    {M4_IN1, M4_IN2, M4_PWM, M4_C1, M4_C2, 0, 0, 0, 0, 0.0f, 0.0f,
-     0.2f, 0.5f, 0}};
+    {M1_IN1, M1_IN2, M1_PWM, M1_C1, M1_C2, 0, 0, 0, 0, 0.0f, 0.0f, 0.8f, 1.5f, 80},
+    {M2_IN1, M2_IN2, M2_PWM, M2_C1, M2_C2, 0, 0, 0, 0, 0.0f, 0.0f, 0.18f, 0.8f, 45},
+    {M3_IN1, M3_IN2, M3_PWM, M3_C1, M3_C2, 0, 0, 0, 0, 0.0f, 0.0f, 0.18f, 0.8f, 45},
+    {M4_IN1, M4_IN2, M4_PWM, M4_C1, M4_C2, 0, 0, 0, 0, 0.0f, 0.0f, 0.2f, 0.5f, 0}};
 
 void setupMotors(motor &m)
 {
@@ -193,19 +201,40 @@ float computeHybridControl(motor *m, float targetSpeed)
 
 // ================= CONTROLE DE MOTOR =================
 
+static bool g_modoCameraAtivo = false;
+
+void setModoCameraAtivo(bool ativo)
+{
+    g_modoCameraAtivo = ativo;
+}
+
 void setMotorPWM(motor *m, float val)
 {
-    const int PWM_MIN = 35;
-
     int pwm = abs((int)val);
 
-    if (pwm < PWM_MIN && pwm > 0)
+    if (g_modoCameraAtivo)
     {
-        pwm = 0;
+        const int PWM_MIN_CAMERA = 120;
+        if (pwm > 0 && pwm < PWM_MIN_CAMERA)
+        {
+            pwm = PWM_MIN_CAMERA;
+        }
+        else if (pwm > 255)
+        {
+            pwm = 255;
+        }
     }
-    else if (pwm > 255)
+    else
     {
-        pwm = 255;
+        const int PWM_MIN = 35;
+        if (pwm < PWM_MIN && pwm > 0)
+        {
+            pwm = 0;
+        }
+        else if (pwm > 255)
+        {
+            pwm = 255;
+        }
     }
 
     if (val > 1.0f)
@@ -298,9 +327,9 @@ spdWheels conversion(float lx, float ly, float rx)
     float vx_r = vx * cos(headingOffset) - vy * sin(headingOffset);
     float vy_r = vx * sin(headingOffset) + vy * cos(headingOffset);
 
-    vx_r = deadzone(vx_r, 0.01f);
-    vy_r = deadzone(vy_r, 0.01f);
-    w = deadzone(w, 0.01f);
+    vx_r = deadzone(vx_r, 0.10f);
+    vy_r = deadzone(vy_r, 0.10f);
+    w = deadzone(w, 0.10f);
 
     const float r = radius;
     const float L = center;
@@ -347,14 +376,15 @@ int main()
     iniciarRecepcaoControle();
     iniciarRecepcaoCamera();
 
-    std::cout << "\n=== SISTEMA OMNI INTEGRADO COM VISÃO ===" << std::endl;
-    std::cout << "Modo: PID Hibrido + Sensores + Pinça + CÂMERA" << std::endl;
+    std::cout << "\n=== SISTEMA OMNI COM SEQUÊNCIA AUTOMÁTICA ===" << std::endl;
+    std::cout << "Modo: Detecção ArUco + Sequência Automatizada" << std::endl;
     std::cout << "\nControles:" << std::endl;
-    std::cout << "  - SHARE: Ativa/Desativa modo câmera" << std::endl;
-    std::cout << "  - L1: Sobe elevador" << std::endl;
-    std::cout << "  - L2: Desce elevador" << std::endl;
+    std::cout << "  - SHARE: Ativa modo câmera (busca ArUco)" << std::endl;
+    std::cout << "  - Ao centralizar ArUco: executa sequência automática" << std::endl;
+    std::cout << "  - L1: Sobe elevador (manual)" << std::endl;
+    std::cout << "  - L2: Desce elevador (manual)" << std::endl;
     std::cout << "  - TRIANGLE: Monitor de sensores" << std::endl;
-    std::cout << "  - D-PAD: Controle dos servos\n"
+    std::cout << "  - D-PAD: Controle dos servos (manual)\n"
               << std::endl;
 
     int loopCount = 0;
@@ -366,13 +396,18 @@ int main()
     bool dLeftPressed = false, dRightPressed = false;
     bool dUpPressed = false, dDownPressed = false;
 
-    // VARIÁVEIS PARA OS SENSORES
     bool trianglePressed = false;
     bool monitorSensor = false;
 
-    // VARIÁVEIS PARA CÂMERA
     bool modoCamera = false;
     bool sharePressed = false;
+
+    // VARIÁVEIS DA SEQUÊNCIA AUTOMÁTICA
+    EstadoSequencia estadoSequencia = SEQ_IDLE;
+    int32_t posicaoInicial = 0;
+    int32_t posicaoAlvo = 0;
+    uint32_t tempoInicio = 0;
+    int contadorCentralizado = 0; // Conta frames centralizados
 
     while (true)
     {
@@ -384,8 +419,23 @@ int main()
         if (c.share && !sharePressed)
         {
             modoCamera = !modoCamera;
+            setModoCameraAtivo(modoCamera);
+
+            if (modoCamera)
+            {
+                estadoSequencia = SEQ_ALINHANDO; // Inicia sequência
+            }
+            else
+            {
+                estadoSequencia = SEQ_IDLE; // Cancela sequência
+            }
+
             std::cout << "\n========================================" << std::endl;
             std::cout << "  🎥 MODO CÂMERA: " << (modoCamera ? "ATIVADO ✓" : "DESATIVADO ✗") << std::endl;
+            if (modoCamera)
+            {
+                std::cout << "  Iniciando busca por ArUco..." << std::endl;
+            }
             std::cout << "========================================\n"
                       << std::endl;
             sharePressed = true;
@@ -410,80 +460,223 @@ int main()
             trianglePressed = false;
         }
 
-        // ===== SERVOS (PINÇA: ABRIR/FECHAR) =====
-        if (c.dLeft && !dLeftPressed)
+        // ===== CONTROLE MANUAL DOS SERVOS (se não estiver em sequência) =====
+        if (estadoSequencia == SEQ_IDLE || estadoSequencia == SEQ_COMPLETO)
         {
-            pinca_angulo = SERVO_1_MIN;
-            if (arduinoFd != -1)
-                enviarServos(arduinoFd, pinca_angulo, angulo_angulo);
-            dLeftPressed = true;
+            if (c.dLeft && !dLeftPressed)
+            {
+                pinca_angulo = SERVO_1_MIN;
+                if (arduinoFd != -1)
+                    enviarServos(arduinoFd, pinca_angulo, angulo_angulo);
+                dLeftPressed = true;
+            }
+            else if (!c.dLeft)
+                dLeftPressed = false;
+
+            if (c.dRight && !dRightPressed)
+            {
+                pinca_angulo = SERVO_1_MAX;
+                if (arduinoFd != -1)
+                    enviarServos(arduinoFd, pinca_angulo, angulo_angulo);
+                dRightPressed = true;
+            }
+            else if (!c.dRight)
+                dRightPressed = false;
+
+            if (c.dUp && !dUpPressed)
+            {
+                angulo_angulo += SERVO_STEP;
+                if (angulo_angulo > SERVO_2_MAX)
+                    angulo_angulo = SERVO_2_MAX;
+
+                if (arduinoFd != -1)
+                    enviarServos(arduinoFd, pinca_angulo, angulo_angulo);
+                dUpPressed = true;
+            }
+            else if (!c.dUp)
+                dUpPressed = false;
+
+            if (c.dDown && !dDownPressed)
+            {
+                angulo_angulo -= SERVO_STEP;
+                if (angulo_angulo < SERVO_2_MIN)
+                    angulo_angulo = SERVO_2_MIN;
+
+                if (arduinoFd != -1)
+                    enviarServos(arduinoFd, pinca_angulo, angulo_angulo);
+                dDownPressed = true;
+            }
+            else if (!c.dDown)
+                dDownPressed = false;
         }
-        else if (!c.dLeft)
-            dLeftPressed = false;
 
-        if (c.dRight && !dRightPressed)
-        {
-            pinca_angulo = SERVO_1_MAX;
-            if (arduinoFd != -1)
-                enviarServos(arduinoFd, pinca_angulo, angulo_angulo);
-            dRightPressed = true;
-        }
-        else if (!c.dRight)
-            dRightPressed = false;
-
-        // ===== SERVOS (ÂNGULO: LEVANTAR/ABAIXAR) =====
-        if (c.dUp && !dUpPressed)
-        {
-            angulo_angulo += SERVO_STEP;
-            if (angulo_angulo > SERVO_2_MAX)
-                angulo_angulo = SERVO_2_MAX;
-
-            if (arduinoFd != -1)
-                enviarServos(arduinoFd, pinca_angulo, angulo_angulo);
-            dUpPressed = true;
-        }
-        else if (!c.dUp)
-            dUpPressed = false;
-
-        if (c.dDown && !dDownPressed)
-        {
-            angulo_angulo -= SERVO_STEP;
-            if (angulo_angulo < SERVO_2_MIN)
-                angulo_angulo = SERVO_2_MIN;
-
-            if (arduinoFd != -1)
-                enviarServos(arduinoFd, pinca_angulo, angulo_angulo);
-            dDownPressed = true;
-        }
-        else if (!c.dDown)
-            dDownPressed = false;
-
-        // ===== MOTOR 4 (ELEVADOR) =====
-        // L1 SOBE (forward=true) | L2 DESCE (forward=false)
+        // ===== MOTOR 4 (ELEVADOR) - HOMING =====
         updateMotorSpeed(&motors[3]);
-
         homing(motors[3], estadoElevador, fimCursoAtivo);
 
-        if (estadoElevador == 2)
+        // ===== SEQUÊNCIA AUTOMÁTICA =====
+        if (estadoElevador == 2) // Só executa após homing
         {
-            if (c.l1)
+            switch (estadoSequencia)
             {
-                // L1 SOBE
-                setMotorSimple(M4_IN1, M4_IN2, M4_PWM, 255, true);
-            }
-            else if (c.l2 && !fimCursoAtivo)
-            {
-                // L2 DESCE (só se não estiver no fim de curso)
-                setMotorSimple(M4_IN1, M4_IN2, M4_PWM, 255, false);
-            }
-            else
-            {
-                stopMotorSimple(M4_IN1, M4_IN2, M4_PWM);
-
-                if (fimCursoAtivo)
+            case SEQ_IDLE:
+            case SEQ_COMPLETO:
+                // Controle manual do elevador
+                if (c.l1)
                 {
-                    motors[3].pos = 0;
+                    setMotorSimple(M4_IN1, M4_IN2, M4_PWM, 255, true);
                 }
+                else if (c.l2 && !fimCursoAtivo)
+                {
+                    setMotorSimple(M4_IN1, M4_IN2, M4_PWM, 255, false);
+                }
+                else
+                {
+                    stopMotorSimple(M4_IN1, M4_IN2, M4_PWM);
+                    if (fimCursoAtivo)
+                    {
+                        motors[3].pos = 0;
+                    }
+                }
+                break;
+
+            case SEQ_ALINHANDO:
+                if (!modoCamera)
+                { // segurança
+                    estadoSequencia = SEQ_IDLE;
+                    break;
+                }
+
+                if (cam.comando == 'P')
+                {
+                    contadorCentralizado++;
+                    if (contadorCentralizado > 30)
+                    {
+                        std::cout << "\n✓ ArUco centralizado! Iniciando sequência...\n"
+                                  << std::endl;
+
+                        posicaoInicial = motors[3].pos;
+                        posicaoAlvo = posicaoInicial + 120;
+
+                        estadoSequencia = SEQ_SUBINDO_120;
+                        contadorCentralizado = 0;
+
+
+                    }
+                }
+                else
+                {
+                    contadorCentralizado = 0;
+                }
+                break;
+
+            case SEQ_SUBINDO_120:
+                std::cout << "[SEQ] Subindo 120 passos... (" << motors[3].pos << "/" << posicaoAlvo << ")" << std::endl;
+                if (motors[3].pos < posicaoAlvo)
+                {
+                    setMotorSimple(M4_IN1, M4_IN2, M4_PWM, 200, true);
+                }
+                else
+                {
+                    stopMotorSimple(M4_IN1, M4_IN2, M4_PWM);
+                    std::cout << "✓ 120 passos completos!\n"
+                              << std::endl;
+                    estadoSequencia = SEQ_ABRINDO_GARRA;
+                    gpioDelay(500000); // 0.5s de pausa
+                }
+                break;
+
+            case SEQ_ABRINDO_GARRA:
+                std::cout << "[SEQ] Abrindo garra..." << std::endl;
+                pinca_angulo = SERVO_1_MIN; // Abre
+                if (arduinoFd != -1)
+                    enviarServos(arduinoFd, pinca_angulo, angulo_angulo);
+                gpioDelay(1000000); // 1s
+                std::cout << "✓ Garra aberta!\n"
+                          << std::endl;
+                estadoSequencia = SEQ_FECHANDO_GARRA;
+                break;
+
+            case SEQ_FECHANDO_GARRA:
+                std::cout << "[SEQ] Fechando garra..." << std::endl;
+                pinca_angulo = SERVO_1_MAX; // Fecha
+                if (arduinoFd != -1)
+                    enviarServos(arduinoFd, pinca_angulo, angulo_angulo);
+                gpioDelay(1000000); // 1s
+                std::cout << "✓ Garra fechada!\n"
+                          << std::endl;
+                estadoSequencia = SEQ_LEVANTANDO_GARRA;
+                break;
+
+            case SEQ_LEVANTANDO_GARRA:
+                std::cout << "[SEQ] Levantando garra ao máximo..." << std::endl;
+                angulo_angulo = SERVO_2_MAX; // Levanta
+                if (arduinoFd != -1)
+                    enviarServos(arduinoFd, pinca_angulo, angulo_angulo);
+                gpioDelay(1500000); // 1.5s
+                std::cout << "✓ Garra levantada!\n"
+                          << std::endl;
+                tempoInicio = gpioTick();
+                estadoSequencia = SEQ_AGUARDANDO_3S;
+                break;
+
+            case SEQ_AGUARDANDO_3S:
+            {
+                uint32_t tempoDecorrido = (gpioTick() - tempoInicio) / 1000; // ms
+                if (tempoDecorrido >= 3000) // 3 segundos
+                {
+                    std::cout << "✓ 3 segundos completos!\n"
+                              << std::endl;
+                    posicaoInicial = motors[3].pos;
+                    posicaoAlvo = posicaoInicial + 7880;
+                    estadoSequencia = SEQ_SUBINDO_7880;
+                }
+                if (loopCount % 50 == 0)
+                {
+                    std::cout << "[SEQ] Aguardando... " << tempoDecorrido / 1000 << "/3s" << std::endl;
+                }
+            }
+            break;
+
+            case SEQ_SUBINDO_7880:
+                std::cout << "[SEQ] Subindo mais 7880 passos... (" << motors[3].pos << "/" << posicaoAlvo << ")" << std::endl;
+                if (motors[3].pos < posicaoAlvo)
+                {
+                    setMotorSimple(M4_IN1, M4_IN2, M4_PWM, 200, true);
+                }
+                else
+                {
+                    stopMotorSimple(M4_IN1, M4_IN2, M4_PWM);
+                    std::cout << "✓ 7880 passos completos!\n"
+                              << std::endl;
+                    estadoSequencia = SEQ_DESCENDO_GARRA;
+                    gpioDelay(500000);
+                }
+                break;
+
+            case SEQ_DESCENDO_GARRA:
+                std::cout << "[SEQ] Descendo garra ao mínimo..." << std::endl;
+                angulo_angulo = SERVO_2_MIN; // Desce
+                if (arduinoFd != -1)
+                    enviarServos(arduinoFd, pinca_angulo, angulo_angulo);
+                gpioDelay(1500000); // 1.5s
+                std::cout << "✓ Garra descida!\n"
+                          << std::endl;
+                estadoSequencia = SEQ_ABRINDO_FINAL;
+                break;
+
+            case SEQ_ABRINDO_FINAL:
+                std::cout << "[SEQ] Abrindo garra final..." << std::endl;
+                pinca_angulo = SERVO_1_MIN; // Abre
+                if (arduinoFd != -1)
+                    enviarServos(arduinoFd, pinca_angulo, angulo_angulo);
+                gpioDelay(1000000); // 1s
+                std::cout << "\n🎉 ===== SEQUÊNCIA COMPLETA! =====\n"
+                          << std::endl;
+                estadoSequencia = SEQ_COMPLETO;
+                modoCamera = false; // Desativa modo câmera
+                setModoCameraAtivo(false);
+                break;
             }
         }
 
@@ -492,46 +685,18 @@ int main()
 
         if (modoCamera)
         {
-            float vx_auto = 0.0f;
-            float rot_auto = 0.0f;
-
-            // 🔍 DEBUG COMPLETO
-            std::cout << "\n🔍 DEBUG CAMERA STATE:" << std::endl;
-            std::cout << "   cam.comando = '" << cam.comando << "' (ASCII: " << (int)cam.comando << ")" << std::endl;
-            std::cout << "   cam.erro_x = " << cam.erro_x << std::endl;
-            std::cout << "   cam.distancia = " << cam.distancia << std::endl;
-            std::cout << "   cam.alvo_detectado = " << cam.alvo_detectado << std::endl;
-
-            if (cam.comando == 'D')
-            {
-                vx_auto = 0.6f;
-                std::cout << "   ➡️ MOVENDO DIREITA (vx=0.6)" << std::endl;
-            }
-            else if (cam.comando == 'E')
-            {
-                vx_auto = -0.6f;
-                std::cout << "   ⬅️ MOVENDO ESQUERDA (vx=-0.6)" << std::endl;
-            }
-            else if (cam.comando == 'P')
-            {
-                vx_auto = 0.0f;
-                std::cout << "   ✅ PARADO (alinhado)" << std::endl;
-            }
-            else // cmd == 'N' ou qualquer outro
-            {
-                rot_auto = 0.3f;
-                std::cout << "   🔄 PROCURANDO (rot=0.3, comando='" << cam.comando << "')" << std::endl;
-            }
-
-            s = conversion(vx_auto, 0.0f, rot_auto);
-
-            std::cout << "   Targets: w1=" << (int)(s.w1 * RAD_TO_PULSE)
-                      << " w2=" << (int)(s.w2 * RAD_TO_PULSE)
-                      << " w3=" << (int)(s.w3 * RAD_TO_PULSE) << std::endl;
+            s = conversion(0.0f, 0.0f, 0.0f);
         }
         else
         {
-            s = conversion(c.lx, c.ly, c.rx);
+            if (estadoSequencia == SEQ_IDLE || estadoSequencia == SEQ_COMPLETO)
+            {
+                s = conversion(c.lx, c.ly, c.rx);
+            }
+            else
+            {
+                s = conversion(0.0f, 0.0f, 0.0f);
+            }
         }
 
         float out1 = computeHybridControl(&motors[0], s.w1 * RAD_TO_PULSE);
@@ -543,42 +708,25 @@ int main()
         setMotorPWM(&motors[2], out3);
 
         // ===== DEBUG / IMPRESSÃO =====
-
         if (loopCount++ % 50 == 0)
         {
             if (monitorSensor && arduinoFd != -1)
             {
-                // MODO SENSORES: Mostra dados do Arduino
                 std::string dados = lerSensores(arduinoFd);
                 std::cout << "[SENSORES] " << dados << std::endl;
             }
-            else
+            else if (estadoSequencia == SEQ_IDLE || estadoSequencia == SEQ_COMPLETO)
             {
-                // MODO NORMAL: Mostra dados dos motores
-                std::cout << "M1: Spd=" << (int)motors[0].filteredSpeed
-                          << " Tgt=" << (int)(s.w1 * RAD_TO_PULSE)
-                          << " PWM=" << (int)out1 << std::endl;
-                std::cout << "M2: Spd=" << (int)motors[1].filteredSpeed
-                          << " Tgt=" << (int)(s.w2 * RAD_TO_PULSE)
-                          << " PWM=" << (int)out2 << std::endl;
-                std::cout << "M3: Spd=" << (int)motors[2].filteredSpeed
-                          << " Tgt=" << (int)(s.w3 * RAD_TO_PULSE)
-                          << " PWM=" << (int)out3 << std::endl;
+                // Debug normal apenas quando inativo
                 std::cout << "M4 (Elev): Pos=" << motors[3].pos
-                          << " FimCurso=" << (fimCursoAtivo ? "ATIVO" : "OFF") << std::endl;
-                std::cout << "Servos: Pinca=" << pinca_angulo
+                          << " | Servos: Pinca=" << pinca_angulo
                           << "° Angulo=" << angulo_angulo << "°" << std::endl;
 
-                // Debug da câmera quando ativa
                 if (modoCamera)
                 {
                     std::cout << "📷 CAM: Cmd=" << cam.comando
-                              << " | Erro=" << cam.erro_x << "px"
-                              << " | Dist~" << cam.distancia << "cm"
-                              << " | Alvo=" << (cam.alvo_detectado ? "✓" : "✗")
-                              << std::endl;
+                              << " | Erro=" << cam.erro_x << "px" << std::endl;
                 }
-
                 std::cout << "---" << std::endl;
             }
         }
